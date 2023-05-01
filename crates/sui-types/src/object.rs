@@ -31,6 +31,7 @@ use crate::{
     gas_coin::GasCoin,
 };
 use sui_protocol_config::ProtocolConfig;
+use crate::layout_resolver::LayoutResolver;
 
 pub const GAS_VALUE_FOR_TESTING: u64 = 300_000_000_000_000;
 pub const OBJECT_START_VERSION: SequenceNumber = SequenceNumber::from_u64(1);
@@ -69,6 +70,10 @@ impl ObjectFormatOptions {
         ObjectFormatOptions {
             include_types: true,
         }
+    }
+
+    pub fn include_types(&self) -> bool {
+        self.include_types
     }
 }
 
@@ -349,7 +354,21 @@ impl MoveObject {
     }
 
     /// Get the total amount of SUI embedded in `self`. Intended for testing purposes
-    pub fn get_total_sui(&self, resolver: &impl GetModule) -> Result<u64, SuiError> {
+    pub fn get_total_sui(&self, layout_resolver: &mut impl LayoutResolver) -> Result<u64, SuiError> {
+        if self.type_.is_gas_coin() {
+            // Fast path without deserialization.
+            return Ok(self.get_coin_value_unsafe());
+        }
+        // If this is a coin but not a SUI coin, the SUI balance must be 0.
+        if self.type_.is_coin() {
+            return Ok(0);
+        }
+        let layout = layout_resolver.get_layout(self, ObjectFormatOptions::with_types())?;
+        let move_struct = self.to_move_struct(&layout)?;
+        Ok(Self::get_total_sui_in_struct(&move_struct, 0))
+    }
+
+    pub fn get_total_sui_legacy(&self, resolver: &impl GetModule) -> Result<u64, SuiError> {
         if self.type_.is_gas_coin() {
             // Fast path without deserialization.
             return Ok(self.get_coin_value_unsafe());
@@ -811,12 +830,20 @@ impl Object {
 // Testing-related APIs.
 impl Object {
     /// Get the total amount of SUI embedded in `self`, including both Move objects and the storage rebate
-    pub fn get_total_sui(&self, resolver: &impl GetModule) -> Result<u64, SuiError> {
+    pub fn get_total_sui(&self, layout_resolver: &mut impl LayoutResolver) -> Result<u64, SuiError> {
         Ok(self.storage_rebate
             + match &self.data {
-                Data::Move(m) => m.get_total_sui(resolver)?,
+                Data::Move(m) => m.get_total_sui(layout_resolver)?,
                 Data::Package(_) => 0,
             })
+    }
+
+    pub fn get_total_sui_legacy(&self, resolver: &impl GetModule) -> Result<u64, SuiError> {
+        Ok(self.storage_rebate
+            + match &self.data {
+            Data::Move(m) => m.get_total_sui_legacy(resolver)?,
+            Data::Package(_) => 0,
+        })
     }
 
     pub fn immutable_with_id_for_testing(id: ObjectID) -> Self {

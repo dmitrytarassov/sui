@@ -38,6 +38,7 @@ use crate::{
     },
 };
 use crate::{is_system_package, SUI_SYSTEM_STATE_OBJECT_ID};
+use crate::layout_resolver::LayoutResolver;
 
 pub type WrittenObjects = BTreeMap<ObjectID, (ObjectRef, Object, WriteKind)>;
 pub type ObjectMap = BTreeMap<ObjectID, Object>;
@@ -1229,6 +1230,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
         &self,
         id: &ObjectID,
         expected_version: SequenceNumber,
+        layout_resolver: &mut impl LayoutResolver,
         do_expensive_checks: bool,
     ) -> Result<(u64, u64), ExecutionError> {
         if let Some(obj) = self.input_objects.get(id) {
@@ -1237,7 +1239,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                 return Err(ExecutionError::invariant_violation(format!("Version mismatching when resolving input object to check conservation--expected {}, got {}", expected_version, obj.version())));
             }
             let input_sui = if do_expensive_checks {
-                obj.get_total_sui(&self).map_err(|_e| {
+                obj.get_total_sui(layout_resolver).map_err(|_e| {
                     ExecutionError::invariant_violation(
                         "Failed looking up output SUI in SUI conservation checking",
                     )
@@ -1266,7 +1268,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                     return Err(ExecutionError::invariant_violation(format!("Version mismatching when resolving dynamic field to check conservation--expected {}, got {}", expected_version, obj.version())));
                 }
                 let input_sui = if do_expensive_checks {
-                    obj.get_total_sui(&self).map_err(|_e| {
+                    obj.get_total_sui(layout_resolver).map_err(|_e| {
                         ExecutionError::invariant_violation(
                             "Failed looking up output SUI in SUI conservation checking",
                         )
@@ -1290,7 +1292,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                         )
                     })?;
                 let input_sui = if do_expensive_checks {
-                    obj.get_total_sui(&self).map_err(|_e| {
+                    obj.get_total_sui(layout_resolver).map_err(|_e| {
                         ExecutionError::invariant_violation(
                             "Failed looking up output SUI in SUI conservation checking",
                         )
@@ -1319,6 +1321,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
     pub fn check_sui_conserved(
         &self,
         advance_epoch_gas_summary: Option<(u64, u64)>,
+        layout_resolver: &mut impl LayoutResolver,
         do_expensive_checks: bool,
     ) -> Result<(), ExecutionError> {
         // total amount of SUI in input objects, including both coins and storage rebates
@@ -1336,10 +1339,10 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                     // is the object version at tx input
                     let input_version = output_obj.version();
                     let (input_sui, input_storage_rebate) =
-                        self.get_input_sui(id, input_version, do_expensive_checks)?;
+                        self.get_input_sui(id, input_version, layout_resolver, do_expensive_checks)?;
                     total_input_sui += input_sui;
                     if do_expensive_checks {
-                        total_output_sui += output_obj.get_total_sui(&self).map_err(|_e| {
+                        total_output_sui += output_obj.get_total_sui(layout_resolver).map_err(|_e| {
                             ExecutionError::invariant_violation(
                                 "Failed looking up output SUI in SUI conservation checking",
                             )
@@ -1351,7 +1354,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                 WriteKind::Create => {
                     // created objects did not exist at input, and thus contribute 0 to input SUI
                     if do_expensive_checks {
-                        total_output_sui += output_obj.get_total_sui(&self).map_err(|_e| {
+                        total_output_sui += output_obj.get_total_sui(layout_resolver).map_err(|_e| {
                             ExecutionError::invariant_violation(
                                 "Failed looking up output SUI in SUI conservation checking",
                             )
@@ -1365,7 +1368,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                     // 2. wrapped in a dynamic field A, or itself a dynamic field
                     // in both cases, its contribution to input SUI will be captured by looking at A
                     if do_expensive_checks {
-                        total_output_sui += output_obj.get_total_sui(&self).map_err(|_e| {
+                        total_output_sui += output_obj.get_total_sui(layout_resolver).map_err(|_e| {
                             ExecutionError::invariant_violation(
                                 "Failed looking up output SUI in SUI conservation checking",
                             )
@@ -1379,7 +1382,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
             match kind {
                 DeleteKind::Normal => {
                     let (input_sui, input_storage_rebate) =
-                        self.get_input_sui(id, *input_version, do_expensive_checks)?;
+                        self.get_input_sui(id, *input_version, layout_resolver, do_expensive_checks)?;
                     total_input_sui += input_sui;
                     total_input_rebate += input_storage_rebate;
                 }
@@ -1387,7 +1390,7 @@ impl<S: GetModule + ObjectStore + BackingPackageStore> TemporaryStore<S> {
                     // wrapped object was a tx input or dynamic field--need to account for it in input SUI
                     // note: if an object is created by the tx, then wrapped, it will not appear here
                     let (input_sui, input_storage_rebate) =
-                        self.get_input_sui(id, *input_version, do_expensive_checks)?;
+                        self.get_input_sui(id, *input_version, layout_resolver, do_expensive_checks)?;
                     total_input_sui += input_sui;
                     total_input_rebate += input_storage_rebate;
                     // else, the wrapped object was either:
@@ -1494,7 +1497,11 @@ impl<S: ChildObjectResolver> Storage for TemporaryStore<S> {
 
 impl<S: BackingPackageStore> BackingPackageStore for TemporaryStore<S> {
     fn get_package_object(&self, package_id: &ObjectID) -> SuiResult<Option<Object>> {
-        self.store.get_package_object(package_id)
+        if let Some((obj, _)) = self.written.get(package_id) {
+            Ok(Some(obj.clone()))
+        } else {
+            self.store.get_package_object(package_id)
+        }
     }
 }
 

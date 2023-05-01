@@ -135,7 +135,7 @@ pub fn assert_accounts_match(
                 .unwrap()
                 .unwrap();
             let total_sui_value =
-                object.get_total_sui(&executor.state.db()).unwrap() - object.storage_rebate;
+                object.get_total_sui_legacy(&executor.state.db()).unwrap() - object.storage_rebate;
             let account_balance_i = account.current_balances[balance_idx];
             prop_assert_eq!(
                 account_balance_i,
