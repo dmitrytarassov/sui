@@ -1496,7 +1496,7 @@ where
         };
 
         let tx_digest = *certificate.digest();
-        let _timeout_after_quorum = self.timeouts.post_quorum_timeout;
+        let timeout_after_quorum = self.timeouts.post_quorum_timeout;
 
         let cert_ref = certificate;
         let _threshold = self.committee.quorum_threshold();
